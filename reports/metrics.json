@@ -1,0 +1,114 @@
+{
+  "data": {
+    "rows": 30000,
+    "train_rows": 24000,
+    "test_rows": 6000,
+    "default_rate": 0.2212,
+    "features": 17
+  },
+  "models": {
+    "logistic_regression": {
+      "cv_auc_mean": 0.7619,
+      "cv_auc_std": 0.0085,
+      "test": {
+        "auc": 0.7434,
+        "gini": 0.4869,
+        "ks": 0.3856,
+        "pr_auc": 0.5215,
+        "brier": 0.1396
+      }
+    },
+    "lightgbm": {
+      "cv_auc_mean": 0.7849,
+      "cv_auc_std": 0.0047,
+      "test": {
+        "auc": 0.7814,
+        "gini": 0.5629,
+        "ks": 0.4295,
+        "pr_auc": 0.5678,
+        "brier": 0.134
+      }
+    }
+  },
+  "business": {
+    "assumption": "approve a payer = +1, approve a defaulter = -5, reject = 0",
+    "cutoff_probability": 0.17,
+    "model": {
+      "approval_rate": 0.576,
+      "default_rate_among_approved": 0.1001,
+      "profit_per_applicant": 0.23
+    },
+    "approve_everyone": {
+      "approval_rate": 1.0,
+      "default_rate_among_approved": 0.2212,
+      "profit_per_applicant": -0.327
+    },
+    "rule_reject_2_months_late": {
+      "approval_rate": 0.894,
+      "default_rate_among_approved": 0.1655,
+      "profit_per_applicant": 0.006
+    },
+    "defaulters_rejected_pct": 0.7393,
+    "payers_rejected_pct": 0.3345
+  },
+  "risk_bands": [
+    {
+      "band": "A",
+      "clients": 1932,
+      "default_rate": 0.074
+    },
+    {
+      "band": "B",
+      "clients": 1997,
+      "default_rate": 0.1422
+    },
+    {
+      "band": "C",
+      "clients": 926,
+      "default_rate": 0.2538
+    },
+    {
+      "band": "D",
+      "clients": 483,
+      "default_rate": 0.4431
+    },
+    {
+      "band": "E",
+      "clients": 662,
+      "default_rate": 0.6813
+    }
+  ],
+  "fairness_by_sex": {
+    "male": {
+      "clients": 2402,
+      "auc": 0.7779,
+      "approval_rate": 0.5608,
+      "actual_default_rate": 0.2336
+    },
+    "female": {
+      "clients": 3598,
+      "auc": 0.783,
+      "approval_rate": 0.5862,
+      "actual_default_rate": 0.2129
+    }
+  },
+  "feature_importance": {
+    "max_months_late": 0.3112,
+    "months_late_1": 0.2761,
+    "bill_avg_6m": 0.1598,
+    "limit_bal": 0.1477,
+    "paid_avg_6m": 0.1446,
+    "util_trend": 0.1135,
+    "util_1": 0.111,
+    "times_late_6m": 0.1058,
+    "pay_ratio_avg": 0.0919,
+    "zero_payment_months": 0.0883,
+    "late_streak": 0.07,
+    "age": 0.0571,
+    "pay_ratio_1": 0.0559,
+    "util_avg_6m": 0.0549,
+    "education": 0.0464,
+    "months_late_2": 0.0123,
+    "months_late_3": 0.0054
+  }
+}

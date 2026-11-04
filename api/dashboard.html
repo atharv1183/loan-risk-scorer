@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Loan Risk Scorer</title>
+<style>
+  :root { --ink:#14213a; --muted:#5d6b82; --line:#dde5f0; --bg:#f6f8fb; --card:#fff; --navy:#1A2D4B;
+          --good:#127a4b; --goodbg:#e5f5ec; --bad:#b42318; --badbg:#fdecea; }
+  * { box-sizing: border-box; }
+  body { margin:0; font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; color:var(--ink); background:var(--bg); }
+  header { padding:22px 24px 6px; max-width:1100px; margin:auto; }
+  h1 { margin:0; font-size:24px; }
+  header p { margin:4px 0 0; color:var(--muted); }
+  main { max-width:1100px; margin:auto; padding:16px 24px 40px; display:grid; grid-template-columns: 1fr 1fr; gap:18px; }
+  @media (max-width: 860px) { main { grid-template-columns:1fr; } }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:18px; }
+  h2 { font-size:16px; margin:0 0 12px; }
+  .kpis { display:grid; grid-template-columns: repeat(3, 1fr); gap:10px; }
+  .kpi { border:1px solid var(--line); border-radius:10px; padding:10px; }
+  .kpi b { display:block; font-size:22px; font-variant-numeric: tabular-nums; }
+  .kpi span { color:var(--muted); font-size:12.5px; }
+  table { width:100%; border-collapse:collapse; font-size:14px; font-variant-numeric: tabular-nums; }
+  th, td { text-align:left; padding:6px 4px; border-bottom:1px solid var(--line); }
+  th { color:var(--muted); font-weight:600; font-size:12.5px; }
+  label { display:block; font-size:12.5px; color:var(--muted); margin:8px 0 3px; }
+  input, select { width:100%; padding:7px 8px; border:1px solid var(--line); border-radius:8px; font:inherit; background:#fff; color:var(--ink); }
+  .row3 { display:grid; grid-template-columns: repeat(3, 1fr); gap:8px; }
+  .six { display:grid; grid-template-columns: repeat(6, 1fr); gap:5px; }
+  .six input { padding:6px 4px; font-size:13px; }
+  .btns { display:flex; gap:8px; margin-top:14px; flex-wrap:wrap; }
+  button { padding:8px 14px; border-radius:8px; border:1px solid var(--navy); background:var(--navy); color:#fff; font:inherit; cursor:pointer; }
+  button.ghost { background:#fff; color:var(--navy); }
+  .result { margin-top:16px; border-radius:10px; padding:14px; display:none; }
+  .result.approve { background:var(--goodbg); }
+  .result.decline { background:var(--badbg); }
+  .result .big { font-size:28px; font-weight:700; font-variant-numeric: tabular-nums; }
+  .bar { height:8px; background:#fff; border-radius:4px; overflow:hidden; margin:6px 0 10px; }
+  .bar i { display:block; height:100%; background:var(--navy); }
+  .note { color:var(--muted); font-size:12.5px; margin-top:10px; }
+  .err { color:var(--bad); margin-top:10px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Loan Risk Scorer</h1>
+  <p>Predicts the chance a credit-card client defaults next month, from 6 months of account history.</p>
+</header>
+<main>
+  <section class="card">
+    <h2>Model on 6,000 held-out clients</h2>
+    <div class="kpis" id="kpis"></div>
+    <h2 style="margin-top:18px">Risk bands</h2>
+    <table id="bands"><thead><tr><th>Band</th><th>Clients</th><th>Actual default rate</th></tr></thead><tbody></tbody></table>
+    <p class="note" id="assumption"></p>
+  </section>
+
+  <section class="card">
+    <h2>Score an applicant</h2>
+    <div class="row3">
+      <div><label for="limit">Credit limit</label><input id="limit" type="number" min="1" value="200000"></div>
+      <div><label for="age">Age</label><input id="age" type="number" min="18" max="100" value="34"></div>
+      <div><label for="edu">Education</label>
+        <select id="edu"><option value="1">Graduate school</option><option value="2" selected>University</option>
+          <option value="3">High school</option><option value="4">Other</option></select></div>
+    </div>
+    <label>Payment status, latest month first (-2 not used, -1 paid in full, 0 on time, 1–9 months late)</label>
+    <div class="six" id="pay"></div>
+    <label>Bill amounts, latest month first</label>
+    <div class="six" id="bill"></div>
+    <label>Amounts paid, latest month first</label>
+    <div class="six" id="paid"></div>
+    <div class="btns">
+      <button id="go">Score</button>
+      <button class="ghost" data-ex="low">Example: steady payer</button>
+      <button class="ghost" data-ex="high">Example: falling behind</button>
+    </div>
+    <div class="result" id="result"></div>
+    <div class="err" id="err"></div>
+  </section>
+</main>
+<script>
+const EX = {
+  low:  {limit:200000, age:34, edu:2, pay:[-1,-1,-1,-1,-1,-1], bill:[12000,9800,15000,8000,11000,9500], paid:[9800,15000,8000,11000,9500,7000]},
+  high: {limit:50000, age:26, edu:2, pay:[2,2,2,0,0,0], bill:[49500,48800,47100,45000,43900,42000], paid:[0,0,1500,2000,1800,1700]},
+};
+const pct = v => (100*v).toFixed(1) + "%";
+function grid(id, vals){ document.getElementById(id).innerHTML = vals.map(v => `<input type="number" value="${v}" aria-label="${id}">`).join(""); }
+function fill(e){ limit.value=e.limit; age.value=e.age; edu.value=e.edu; grid("pay",e.pay); grid("bill",e.bill); grid("paid",e.paid); }
+const read = id => [...document.querySelectorAll(`#${id} input`)].map(i => Number(i.value));
+fill(EX.low);
+document.querySelectorAll("[data-ex]").forEach(b => b.onclick = () => { fill(EX[b.dataset.ex]); score(); });
+document.getElementById("go").onclick = score;
+
+async function score(){
+  err.textContent = "";
+  const body = {limit_bal:Number(limit.value), age:Number(age.value), education:Number(edu.value),
+                pay_status:read("pay"), bill_amounts:read("bill"), paid_amounts:read("paid")};
+  const r = await fetch("/score", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
+  if(!r.ok){ result.style.display="none"; err.textContent = "Check the inputs: " + (await r.text()).slice(0,200); return; }
+  const s = await r.json();
+  result.className = "result " + s.decision;
+  result.style.display = "block";
+  result.innerHTML = `<div class="big">${pct(s.probability_of_default)}</div>
+    <div>chance of default &middot; band <b>${s.risk_band}</b> &middot; <b>${s.decision === "approve" ? "Approve" : "Decline"}</b> (cut-off ${pct(s.cutoff)})</div>
+    <div class="bar"><i style="width:${pct(s.probability_of_default)}"></i></div>
+    ${s.top_reasons.length ? "<b>Main reasons risk is higher</b><ul>" + s.top_reasons.map(x => `<li>${x.description}</li>`).join("") + "</ul>" : "No factor raises this applicant's risk."}`;
+}
+
+fetch("/metrics").then(r => r.json()).then(m => {
+  const t = m.models.lightgbm.test, b = m.business;
+  const k = [[t.auc.toFixed(3),"AUC (0.5 = guessing)"],[t.ks.toFixed(3),"KS statistic"],[t.gini.toFixed(3),"Gini"],
+             [pct(b.model.approval_rate),"approved at cut-off"],[pct(b.model.default_rate_among_approved),"default rate among approved"],
+             [pct(b.approve_everyone.default_rate_among_approved),"default rate if all approved"]];
+  kpis.innerHTML = k.map(([v,l]) => `<div class="kpi"><b>${v}</b><span>${l}</span></div>`).join("");
+  document.querySelector("#bands tbody").innerHTML = m.risk_bands.map(r => `<tr><td>${r.band}</td><td>${r.clients.toLocaleString()}</td><td>${pct(r.default_rate)}</td></tr>`).join("");
+  assumption.textContent = `Cut-off chosen for profit, assuming ${b.assumption}. Model profit per applicant ${b.model.profit_per_applicant} vs ${b.approve_everyone.profit_per_applicant} if everyone is approved.`;
+});
+</script>
+</body>
+</html>
