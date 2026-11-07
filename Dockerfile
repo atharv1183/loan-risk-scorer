@@ -5,6 +5,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY riskscore riskscore
 COPY api api
+COPY worker worker
 COPY models models
 COPY reports reports
 EXPOSE 8000

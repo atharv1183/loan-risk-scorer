@@ -1,6 +1,7 @@
 """Scoring API: send an applicant's account history, get default probability, risk band, decision and reasons.
 
 Run:  uvicorn api.app:app --reload   then open http://127.0.0.1:8000
+Large batches go through the job queue (POST /jobs); see docker-compose.yml to run RabbitMQ, MongoDB and workers.
 """
 from __future__ import annotations
 
@@ -9,38 +10,16 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Literal
 
-import joblib
-import numpy as np
-import pandas as pd
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from riskscore.features import build_features
+from riskscore import jobs
+from riskscore.scorer import bundle, score_many
 
 ROOT = Path(__file__).resolve().parent.parent
-MODEL_PATH = ROOT / "models" / "model.joblib"
 METRICS_PATH = ROOT / "reports" / "metrics.json"
-
-REASONS = {
-    "max_months_late": "Worst payment delay in the last 6 months",
-    "months_late_1": "Late on the most recent payment",
-    "months_late_2": "Late on the payment 2 months ago",
-    "months_late_3": "Late on the payment 3 months ago",
-    "times_late_6m": "Number of late months in the last 6",
-    "late_streak": "Consecutive recent late months",
-    "util_1": "High balance compared with credit limit",
-    "util_avg_6m": "High average balance compared with limit",
-    "util_trend": "Balance rising against the limit",
-    "pay_ratio_1": "Small last payment compared with the bill",
-    "pay_ratio_avg": "Small payments compared with bills",
-    "zero_payment_months": "Months with a bill but no payment",
-    "limit_bal": "Credit limit",
-    "bill_avg_6m": "Average monthly bill",
-    "paid_avg_6m": "Average monthly payment",
-    "age": "Age",
-    "education": "Education level",
-}
+MAX_JOB_ROWS = 100_000
 
 Status = Annotated[int, Field(ge=-2, le=9, description="-2 no use, -1 paid in full, 0 revolving, 1-9 months late")]
 Amount = Annotated[float, Field(ge=-1e7, le=1e8)]
@@ -70,34 +49,24 @@ class Score(BaseModel):
     top_reasons: list[Reason]
 
 
+class JobCreated(BaseModel):
+    job_id: str
+    status: str
+    total_rows: int
+    total_chunks: int
+
+
 @lru_cache(maxsize=1)
-def bundle() -> dict:
-    return joblib.load(MODEL_PATH)
+def get_db():
+    return jobs.mongo_db()
 
 
-def to_frame(a: Applicant) -> pd.DataFrame:
-    row = {"limit_bal": a.limit_bal, "age": a.age, "education": a.education}
-    for i in range(6):
-        row[f"pay_{i + 1}"] = a.pay_status[i]
-        row[f"bill_{i + 1}"] = a.bill_amounts[i]
-        row[f"paid_{i + 1}"] = a.paid_amounts[i]
-    return pd.DataFrame([row])
+@lru_cache(maxsize=1)
+def get_publisher() -> jobs.Publisher:
+    return jobs.RabbitPublisher()
 
 
-def score_applicant(a: Applicant) -> Score:
-    b = bundle()
-    x = build_features(to_frame(a))
-    p = float(b["model"].predict_proba(x)[0, 1])
-    contrib = b["model"].booster_.predict(x, pred_contrib=True)[0, :-1]
-    order = np.argsort(-contrib)[:3]
-    reasons = [Reason(feature=b["features"][i], description=REASONS[b["features"][i]], effect=round(float(contrib[i]), 3))
-               for i in order if contrib[i] > 0]
-    band = next(name for name, upper in b["bands"] if p < upper)
-    return Score(probability_of_default=round(p, 4), risk_band=band,
-                 decision="approve" if p < b["cutoff"] else "decline", cutoff=b["cutoff"], top_reasons=reasons)
-
-
-app = FastAPI(title="Loan Risk Scorer", version="1.0.0")
+app = FastAPI(title="Loan Risk Scorer", version="1.1.0")
 
 
 @app.get("/health")
@@ -107,13 +76,46 @@ def health() -> dict:
 
 
 @app.post("/score", response_model=Score)
-def score(applicant: Applicant) -> Score:
-    return score_applicant(applicant)
+def score(applicant: Applicant) -> dict:
+    return score_many([applicant.model_dump()])[0]
 
 
 @app.post("/score/batch", response_model=list[Score])
-def score_batch(applicants: list[Applicant]) -> list[Score]:
-    return [score_applicant(a) for a in applicants[:1000]]
+def score_batch(applicants: list[Applicant]) -> list[dict]:
+    """Synchronous batch for small lists; use /jobs for large ones."""
+    if len(applicants) > 1000:
+        raise HTTPException(413, "Up to 1,000 applicants here; send larger batches to POST /jobs")
+    return score_many([a.model_dump() for a in applicants])
+
+
+@app.post("/jobs", response_model=JobCreated, status_code=202)
+def create_job(applicants: list[Applicant], db=Depends(get_db), publisher=Depends(get_publisher)) -> dict:
+    """Queue a large batch. Returns at once with a job id; poll GET /jobs/{id} for progress."""
+    if not applicants:
+        raise HTTPException(422, "Send at least one applicant")
+    if len(applicants) > MAX_JOB_ROWS:
+        raise HTTPException(413, f"Up to {MAX_JOB_ROWS:,} applicants per job")
+    try:
+        job = jobs.create_job(db, publisher, [a.model_dump() for a in applicants])
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(503, "Job queue unavailable") from exc
+    return {"job_id": job["_id"], **{k: job[k] for k in ("status", "total_rows", "total_chunks")}}
+
+
+@app.get("/jobs/{job_id}")
+def get_job(job_id: str, db=Depends(get_db)) -> dict:
+    summary = jobs.job_summary(db, job_id)
+    if summary is None:
+        raise HTTPException(404, "No such job")
+    return summary
+
+
+@app.get("/jobs/{job_id}/results")
+def get_job_results(job_id: str, offset: int = Query(0, ge=0), limit: int = Query(100, ge=1, le=1000),
+                    db=Depends(get_db)) -> dict:
+    if db.jobs.find_one({"_id": job_id}, {"_id": 1}) is None:
+        raise HTTPException(404, "No such job")
+    return {"job_id": job_id, "offset": offset, "results": jobs.job_results(db, job_id, offset, limit)}
 
 
 @app.get("/metrics")

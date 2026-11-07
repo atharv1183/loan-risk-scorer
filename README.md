@@ -61,8 +61,38 @@ Run with DuckDB over the cleaned data (`sql/`, results in `reports/sql_findings.
    - `GET /metrics` and `GET /health`.
    - A one-page dashboard at `/`.
    - Inputs are checked with Pydantic, and bad requests get a 422.
-6. **`tests/`** has 11 pytest tests: feature edge cases (zero and negative bills, streaks), API decisions,
-   input validation, and a check that a later payment never lowers risk.
+6. **`riskscore/jobs.py` + `worker/worker.py`** add asynchronous batch scoring:
+   - `POST /jobs` takes up to 100,000 applicants and returns a job id at once (HTTP 202).
+   - The job is split into chunks of 1,000. Chunks are stored in **MongoDB**, and one message per chunk
+     goes on a durable **RabbitMQ** queue, with publisher confirms and persistent messages.
+   - Workers take one chunk at a time (`prefetch_count=1`) and score it in a single vectorised model call.
+     A message is acknowledged only after its results are saved, so a crashed worker's chunk goes to
+     another worker.
+   - A failing chunk is retried up to 3 times, then sent to a dead-letter queue. A redelivered chunk is
+     never counted twice.
+   - `GET /jobs/{id}` shows progress and, at the end, approval rate, risk-band counts and throughput.
+     `GET /jobs/{id}/results` pages through the scores.
+   - More workers score one big job in parallel: `docker compose up --scale worker=4`.
+7. **`tests/`** has 17 pytest tests:
+   - feature edge cases (zero and negative bills, streaks)
+   - API decisions and input validation
+   - a check that a later payment never lowers risk
+   - job splitting, completion and failure handling, idempotent redelivery, and a 503 when the queue is down
+
+## Queue throughput
+
+All 30,000 clients sent as one job (30 chunks), measured with `scripts/load_test.py` on one 12-core
+laptop, 3 runs each:
+
+| Workers | CPU threads per worker | Scoring time | Rows per second |
+|---|---|---|---|
+| 1 | all 12 | 4.3 s | ~6,900 |
+| **4** | **3** | **3.1 s** | **~9,700** |
+| 6 | 2 | 3.0–3.5 s | ~9,300 |
+| 12 | 1 | 3.4–3.7 s | ~8,600 |
+
+On one machine the gain is about 1.4x, because a single worker already uses every core. Workers on separate
+machines add their full speed. `SCORER_THREADS` sets how many cores each worker uses.
 
 ## Run it
 
@@ -72,11 +102,18 @@ pip install -r requirements.txt
 python -m riskscore.data          # download + clean
 python -m riskscore.train         # train, evaluate, save model and charts
 python -m riskscore.sql_analysis  # SQL findings
-pytest                            # 11 tests
+pytest                            # 17 tests
 uvicorn api.app:app --reload      # open http://127.0.0.1:8000
 ```
 
-Or with Docker (after training): `docker build -t loan-risk . && docker run -p 8000:8000 loan-risk`
+Full system with RabbitMQ, MongoDB and 4 workers (after training):
+
+```bash
+docker compose up --build -d --scale worker=4
+python scripts/load_test.py --rows 30000    # queue all 30,000 clients as one job and time it
+```
+
+The RabbitMQ dashboard is at http://localhost:15672 (guest / guest).
 
 Example request:
 

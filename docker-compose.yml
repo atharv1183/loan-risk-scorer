@@ -1,0 +1,49 @@
+# Full system: API + RabbitMQ + MongoDB + scoring workers.
+#   docker compose up --build --scale worker=4
+# API on http://localhost:8000, RabbitMQ dashboard on http://localhost:15672 (guest / guest).
+services:
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    ports: ["5672:5672", "15672:15672"]
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 10s
+      retries: 20
+
+  mongo:
+    image: mongo:7
+    ports: ["27017:27017"]
+    volumes: ["mongo-data:/data/db"]
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 10s
+      retries: 20
+
+  api:
+    build: .
+    image: loan-risk-scorer
+    ports: ["${API_PORT:-8000}:8000"]
+    environment: &env
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/%2F
+      MONGO_URL: mongodb://mongo:27017
+    depends_on:
+      rabbitmq: {condition: service_healthy}
+      mongo: {condition: service_healthy}
+
+  worker:
+    image: loan-risk-scorer
+    command: ["python", "-m", "worker.worker"]
+    environment:
+      <<: *env
+      # CPU threads per worker for model scoring; roughly (CPU cores / number of workers). 0 = all cores.
+      SCORER_THREADS: ${SCORER_THREADS:-0}
+    depends_on:
+      api: {condition: service_started}
+      rabbitmq: {condition: service_healthy}
+      mongo: {condition: service_healthy}
+    restart: on-failure
+
+volumes:
+  mongo-data:
